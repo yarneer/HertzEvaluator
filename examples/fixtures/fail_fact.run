@@ -1,0 +1,4 @@
+output=No result was recorded.
+tools=search,report
+trajectory=plan,search,report,finish
+elapsed_ms=80

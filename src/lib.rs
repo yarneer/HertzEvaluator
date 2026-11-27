@@ -20,15 +20,23 @@
 
 mod case;
 mod promotion;
+mod score;
 mod store;
 
 pub use case::{Case, CaseId};
 pub use promotion::CasePromotion;
+pub use score::{
+    score_run, CaseScore, CheckKind, CheckResult, PinError, PinnedCase, RecordedRun, Scorecard,
+};
 pub use store::{CaseStore, InMemoryStore, StoreError};
 
 #[cfg(test)]
 mod tests {
-    use super::{Case, CaseId, CasePromotion, CaseStore, InMemoryStore, StoreError};
+    use super::{
+        score_run, Case, CaseId, CasePromotion, CaseStore, CheckKind, InMemoryStore, PinnedCase,
+        RecordedRun, StoreError,
+    };
+    use std::time::Duration;
 
     fn case() -> Case {
         Case::new(
@@ -141,5 +149,113 @@ mod tests {
 
         assert!(store.prod().is_empty());
         assert_eq!(store.load(&id), Ok(registered));
+    }
+
+    fn scoring_case() -> (CaseId, Case, PinnedCase) {
+        let mut store = InMemoryStore::new();
+        let case = Case::new(
+            "Evaluate a recorded deployment check.",
+            ["The regression suite passed."],
+        );
+        let id = store.register(case.clone()).unwrap();
+        let pinned = PinnedCase::new(
+            id,
+            case.clone(),
+            ["search", "report"],
+            ["plan", "search", "report"],
+            Duration::from_millis(100),
+        )
+        .unwrap();
+        (id, case, pinned)
+    }
+
+    fn passing_run() -> RecordedRun {
+        RecordedRun::new(
+            "The regression suite passed.",
+            ["search", "report"],
+            ["plan", "search", "report", "finish"],
+            Duration::from_millis(80),
+        )
+    }
+
+    #[test]
+    fn deterministic_checks_pass_through_public_api() {
+        let (_, _, pinned) = scoring_case();
+        let scorecard = score_run(&passing_run(), &[pinned]);
+
+        assert!(scorecard.passed());
+        assert_eq!(scorecard.cases()[0].checks().len(), 4);
+        assert!(scorecard.cases()[0]
+            .checks()
+            .iter()
+            .all(|check| check.passed()));
+    }
+
+    #[test]
+    fn each_deterministic_check_can_fail_alone() {
+        let (_, _, pinned) = scoring_case();
+        let runs = [
+            (
+                CheckKind::RequiredFacts,
+                RecordedRun::new(
+                    "No result was recorded.",
+                    ["search", "report"],
+                    ["plan", "search", "report", "finish"],
+                    Duration::from_millis(80),
+                ),
+            ),
+            (
+                CheckKind::RequiredTools,
+                RecordedRun::new(
+                    "The regression suite passed.",
+                    ["search"],
+                    ["plan", "search", "report", "finish"],
+                    Duration::from_millis(80),
+                ),
+            ),
+            (
+                CheckKind::Trajectory,
+                RecordedRun::new(
+                    "The regression suite passed.",
+                    ["search", "report"],
+                    ["plan", "report", "search", "finish"],
+                    Duration::from_millis(80),
+                ),
+            ),
+            (
+                CheckKind::Latency,
+                RecordedRun::new(
+                    "The regression suite passed.",
+                    ["search", "report"],
+                    ["plan", "search", "report", "finish"],
+                    Duration::from_millis(101),
+                ),
+            ),
+        ];
+
+        for (expected_failure, run) in runs {
+            let scorecard = score_run(&run, std::slice::from_ref(&pinned));
+            let failed: Vec<_> = scorecard.cases()[0]
+                .checks()
+                .iter()
+                .filter(|check| !check.passed())
+                .map(|check| check.kind())
+                .collect();
+            assert_eq!(failed, [expected_failure]);
+        }
+    }
+
+    #[test]
+    fn scoring_unreviewed_cases_does_not_change_storage_or_prod() {
+        let (id, case, pinned) = scoring_case();
+        let mut store = InMemoryStore::new();
+        assert_eq!(store.register(case.clone()), Ok(id));
+        let prod_before = store.prod().clone();
+
+        let _ = score_run(&passing_run(), &[pinned]);
+
+        assert!(store.prod().is_empty());
+        assert_eq!(store.prod(), &prod_before);
+        assert_eq!(store.load(&id), Ok(case));
     }
 }
