@@ -27,8 +27,19 @@
 //! against, and the check reports [`CheckOutcome::NotEvaluated`] rather than
 //! passing on an empty requirement. [`CheckResult::passed`] is true only for
 //! [`CheckOutcome::Passed`], and [`compare_scorecards`] counts only those, so
-//! filling a missing constraint in later turns an unevaluated check into a
-//! real pass or a real failure instead of reading as a regression from a pass.
+//! an unrecorded constraint never reads as a satisfied one.
+//!
+//! # Comparability
+//!
+//! Counting only true passes leaves the count dependent on what each scorecard
+//! stated a requirement for. Two scorecards therefore carry a passed-check
+//! delta only when they judged the same things: the same cases, and for each
+//! case the same set of evaluated checks. Otherwise [`compare_scorecards`]
+//! reports [`ComparisonOutcome::Incomparable`] with the [`Incomparability`]
+//! that applies, and there is no direction to read. This is what keeps a
+//! withdrawn requirement, which lowers the count without the run changing a
+//! byte, from reading as a regression, and a newly stated one from reading as
+//! an improvement or as no change at all.
 
 mod case;
 mod compare;
@@ -54,7 +65,7 @@ mod score {
 mod store;
 
 pub use case::{Case, CaseId};
-pub use compare::{compare_scorecards, ComparisonOutcome, ComparisonReport};
+pub use compare::{compare_scorecards, ComparisonOutcome, ComparisonReport, Incomparability};
 pub use file_store::FileStore;
 pub use promotion::CasePromotion;
 pub use score::{
@@ -67,8 +78,8 @@ pub use store::{CaseStore, InMemoryStore, ScorecardStore, StoreError};
 mod tests {
     use super::{
         compare_scorecards, score_run, Case, CaseId, CasePromotion, CaseStore, CheckKind,
-        CheckOutcome, ComparisonOutcome, FileStore, InMemoryStore, PinnedCase, RecordedRun,
-        Scorecard, ScorecardStore, StoreError,
+        CheckOutcome, ComparisonOutcome, FileStore, InMemoryStore, Incomparability, PinnedCase,
+        RecordedRun, Scorecard, ScorecardStore, StoreError,
     };
     use std::{
         fs,
@@ -434,9 +445,130 @@ mod tests {
         );
         let report = compare_scorecards(&candidate, Some(&baseline));
         assert_ne!(report.outcome(), ComparisonOutcome::Regressed);
-        assert_eq!(report.outcome(), ComparisonOutcome::Unchanged);
+        assert_eq!(
+            report.outcome(),
+            ComparisonOutcome::Incomparable(Incomparability::StatedRequirementsDiffer)
+        );
         assert_eq!(report.baseline_passed_checks(), Some(1));
         assert_eq!(report.candidate_passed_checks(), 1);
+    }
+
+    #[test]
+    fn withdrawing_a_requirement_is_not_a_regression() {
+        let (id, case) = mixed_requirement_case();
+        let stated = PinnedCase::new(
+            id,
+            case.clone(),
+            ["search", "report"],
+            ["plan", "search", "report"],
+            Some(Duration::from_millis(100)),
+        )
+        .unwrap();
+        let withdrawn = PinnedCase::new(
+            id,
+            case,
+            ["search", "report"],
+            ["plan", "search", "report"],
+            None,
+        )
+        .unwrap();
+        let run = RecordedRun::new(
+            "No result was recorded.",
+            ["search", "report"],
+            ["plan", "search", "report", "finish"],
+            Duration::from_millis(80),
+        );
+        let baseline = score_run(&run, &[stated]);
+        let candidate = score_run(&run, &[withdrawn]);
+
+        assert_eq!(
+            baseline.cases()[0].checks()[3].outcome(),
+            CheckOutcome::Passed
+        );
+        assert_eq!(
+            candidate.cases()[0].checks()[3].outcome(),
+            CheckOutcome::NotEvaluated
+        );
+        assert_eq!(baseline.passed_checks(), 3);
+        assert_eq!(candidate.passed_checks(), 2);
+
+        let report = compare_scorecards(&candidate, Some(&baseline));
+        assert_ne!(report.outcome(), ComparisonOutcome::Regressed);
+        assert_eq!(
+            report.outcome(),
+            ComparisonOutcome::Incomparable(Incomparability::StatedRequirementsDiffer)
+        );
+        assert_eq!(report.baseline_passed_checks(), Some(3));
+        assert_eq!(report.candidate_passed_checks(), 2);
+    }
+
+    #[test]
+    fn scorecards_covering_different_cases_are_incomparable() {
+        let mut store = InMemoryStore::new();
+        let covered = Case::new(
+            "Evaluate the case the candidate covers.",
+            ["The regression suite passed."],
+        );
+        let other = Case::new(
+            "Evaluate the case the baseline covers.",
+            ["The deployment was rolled back."],
+        );
+        let covered_id = store.register(covered.clone()).unwrap();
+        let other_id = store.register(other.clone()).unwrap();
+        let run = RecordedRun::new(
+            "The regression suite passed.",
+            ["search"],
+            NO_REQUIREMENT,
+            Duration::from_millis(80),
+        );
+        let candidate = score_run(
+            &run,
+            &[PinnedCase::new(covered_id, covered, ["search"], NO_REQUIREMENT, None).unwrap()],
+        );
+        let baseline = score_run(
+            &run,
+            &[PinnedCase::new(other_id, other, ["report"], NO_REQUIREMENT, None).unwrap()],
+        );
+
+        assert_ne!(
+            candidate.cases()[0].case_id(),
+            baseline.cases()[0].case_id()
+        );
+        assert_eq!(candidate.evaluated_checks(), baseline.evaluated_checks());
+        assert_eq!(candidate.passed_checks(), 2);
+        assert_eq!(baseline.passed_checks(), 0);
+
+        let report = compare_scorecards(&candidate, Some(&baseline));
+        assert_ne!(report.outcome(), ComparisonOutcome::Improved);
+        assert_eq!(
+            report.outcome(),
+            ComparisonOutcome::Incomparable(Incomparability::CaseSetDiffers)
+        );
+        assert_eq!(report.baseline_passed_checks(), Some(0));
+        assert_eq!(report.candidate_passed_checks(), 2);
+    }
+
+    #[test]
+    fn fewer_passes_on_the_same_evaluated_checks_is_still_a_regression() {
+        let (_, _, pinned) = scoring_case();
+        let baseline = score_run(&passing_run(), std::slice::from_ref(&pinned));
+        let candidate = score_run(
+            &RecordedRun::new(
+                "No result was recorded.",
+                ["search", "report"],
+                ["plan", "search", "report", "finish"],
+                Duration::from_millis(80),
+            ),
+            &[pinned],
+        );
+
+        assert_eq!(candidate.evaluated_checks(), 4);
+        assert_eq!(baseline.evaluated_checks(), 4);
+
+        let report = compare_scorecards(&candidate, Some(&baseline));
+        assert_eq!(report.outcome(), ComparisonOutcome::Regressed);
+        assert_eq!(report.baseline_passed_checks(), Some(4));
+        assert_eq!(report.candidate_passed_checks(), 3);
     }
 
     #[test]
