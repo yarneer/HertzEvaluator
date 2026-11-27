@@ -204,12 +204,17 @@ fn evaluated_surface(scorecard: &Scorecard) -> Vec<([u8; 32], u8)> {
     surface
 }
 
+/// Returns one bit per check kind that carried a verdict.
+///
+/// The bits are combined with a bitwise or rather than added, so the mask does
+/// not depend on each kind appearing at most once. Addition would carry a
+/// repeated kind into the neighbouring kind's bit and silently report a
+/// different verdict surface as the same one.
 fn evaluated_kinds(case: &CaseScore) -> u8 {
     case.checks()
         .iter()
         .filter(|check| check.evaluated())
-        .map(|check| 1 << kind_index(check.kind()))
-        .sum()
+        .fold(0, |mask, check| mask | 1 << kind_index(check.kind()))
 }
 
 const fn kind_index(kind: CheckKind) -> u8 {
