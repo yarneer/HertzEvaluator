@@ -1,6 +1,6 @@
 use hertz_evaluator::{
-    score_run, Case, CasePromotion, CaseStore, CheckKind, InMemoryStore, PinnedCase, RecordedRun,
-    Scorecard,
+    score_run, Case, CasePromotion, CaseStore, CheckKind, CheckOutcome, InMemoryStore, PinnedCase,
+    RecordedRun, Scorecard,
 };
 use std::{fs, process::ExitCode, time::Duration, time::Instant};
 
@@ -47,7 +47,7 @@ fn demonstrate() -> Result<String, String> {
         let failed: Vec<_> = first.cases()[0]
             .checks()
             .iter()
-            .filter(|check| !check.passed())
+            .filter(|check| check.failed())
             .map(|check| check.kind())
             .collect();
         let expected: Vec<_> = expected_failure.into_iter().collect();
@@ -93,7 +93,7 @@ fn pinned_case() -> Result<(InMemoryStore, PinnedCase), String> {
         case,
         ["search", "report"],
         ["plan", "search", "report"],
-        Duration::from_millis(100),
+        Some(Duration::from_millis(100)),
     )
     .map_err(|error| error.to_string())?;
     Ok((store, pinned))
@@ -129,17 +129,19 @@ fn list(value: &str) -> impl Iterator<Item = &str> {
     value.split(',').filter(|item| !item.is_empty())
 }
 
+fn label(outcome: CheckOutcome) -> &'static str {
+    match outcome {
+        CheckOutcome::Passed => "pass",
+        CheckOutcome::Failed => "fail",
+        CheckOutcome::NotEvaluated => "not-evaluated",
+    }
+}
+
 fn render(name: &str, scorecard: &Scorecard) -> String {
     let checks = scorecard.cases()[0]
         .checks()
         .iter()
-        .map(|check| {
-            format!(
-                "{:?}={}",
-                check.kind(),
-                if check.passed() { "pass" } else { "fail" }
-            )
-        })
+        .map(|check| format!("{:?}={}", check.kind(), label(check.outcome())))
         .collect::<Vec<_>>()
         .join(",");
     format!("{name}: {checks}\n")

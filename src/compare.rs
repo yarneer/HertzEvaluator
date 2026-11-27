@@ -2,15 +2,19 @@ use crate::Scorecard;
 use std::fmt;
 
 /// The aggregate result of comparing a candidate scorecard with a baseline.
+///
+/// Only a check that passed a stated requirement counts. A check reporting
+/// [`crate::CheckOutcome::NotEvaluated`] counts for neither side, so supplying
+/// a constraint the baseline never stated cannot read as a regression.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ComparisonOutcome {
     /// No baseline was supplied.
     FirstRun,
-    /// The candidate passed more checks than the baseline.
+    /// The candidate passed more stated requirements than the baseline.
     Improved,
-    /// The candidate passed the same number of checks as the baseline.
+    /// The candidate passed as many stated requirements as the baseline.
     Unchanged,
-    /// The candidate passed fewer checks than the baseline.
+    /// The candidate passed fewer stated requirements than the baseline.
     Regressed,
 }
 
@@ -28,12 +32,21 @@ impl ComparisonReport {
         self.outcome
     }
 
-    /// Returns the baseline's passed-check count, or `None` for a first run.
+    /// Returns how many stated requirements the baseline passed, or `None` for
+    /// a first run.
+    ///
+    /// Checks reporting [`crate::CheckOutcome::NotEvaluated`] are excluded, so
+    /// this is at most the number of checks the baseline evaluated, not the
+    /// number it ran.
     pub const fn baseline_passed_checks(&self) -> Option<usize> {
         self.baseline_passed_checks
     }
 
-    /// Returns the candidate's passed-check count.
+    /// Returns how many stated requirements the candidate passed.
+    ///
+    /// Checks reporting [`crate::CheckOutcome::NotEvaluated`] are excluded, so
+    /// this is at most the number of checks the candidate evaluated, not the
+    /// number it ran.
     pub const fn candidate_passed_checks(&self) -> usize {
         self.candidate_passed_checks
     }
@@ -57,9 +70,12 @@ impl fmt::Display for ComparisonReport {
 }
 
 /// Compares passed-check counts without adopting or mutating either scorecard.
+///
+/// Only checks that passed a stated requirement are counted. An unevaluated
+/// check contributes to neither count.
 pub fn compare_scorecards(candidate: &Scorecard, baseline: Option<&Scorecard>) -> ComparisonReport {
-    let candidate_passed_checks = passed_checks(candidate);
-    let baseline_passed_checks = baseline.map(passed_checks);
+    let candidate_passed_checks = candidate.passed_checks();
+    let baseline_passed_checks = baseline.map(Scorecard::passed_checks);
     let outcome = match baseline_passed_checks {
         None => ComparisonOutcome::FirstRun,
         Some(count) if candidate_passed_checks > count => ComparisonOutcome::Improved,
@@ -72,13 +88,4 @@ pub fn compare_scorecards(candidate: &Scorecard, baseline: Option<&Scorecard>) -
         baseline_passed_checks,
         candidate_passed_checks,
     }
-}
-
-fn passed_checks(scorecard: &Scorecard) -> usize {
-    scorecard
-        .cases()
-        .iter()
-        .flat_map(|case| case.checks())
-        .filter(|check| check.passed())
-        .count()
 }
