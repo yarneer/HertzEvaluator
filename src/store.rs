@@ -36,6 +36,8 @@ pub enum StoreError {
     Io(String),
     /// Stored bytes could not be decoded or failed validation.
     InvalidData(String),
+    /// Stored bytes were written by an unsupported store format version.
+    UnsupportedFormat(String),
 }
 
 impl fmt::Display for StoreError {
@@ -46,6 +48,9 @@ impl fmt::Display for StoreError {
             Self::ScorecardNotFound(name) => write!(formatter, "scorecard not found: {name}"),
             Self::Io(message) => write!(formatter, "file store I/O error: {message}"),
             Self::InvalidData(message) => write!(formatter, "invalid file store data: {message}"),
+            Self::UnsupportedFormat(message) => {
+                write!(formatter, "unsupported file store format: {message}")
+            }
         }
     }
 }

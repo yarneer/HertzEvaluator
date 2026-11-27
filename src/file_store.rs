@@ -1,6 +1,6 @@
 use crate::{
-    score::restore_scorecard, Case, CaseId, CasePromotion, CaseStore, CheckKind, Scorecard,
-    ScorecardStore, StoreError,
+    score::restore_scorecard, Case, CaseId, CasePromotion, CaseStore, CheckKind, CheckOutcome,
+    Scorecard, ScorecardStore, StoreError,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -9,13 +9,21 @@ use std::{
     path::Path,
 };
 
-const MAGIC: &[u8] = b"HERTZ-FILE-1\n";
+const MAGIC: &[u8] = b"HERTZ-FILE-2\n";
+const MAGIC_V1: &[u8] = b"HERTZ-FILE-1\n";
 const CASE: u8 = 1;
 const APPROVE: u8 = 2;
 const DEMOTE: u8 = 3;
 const SCORECARD: u8 = 4;
 
 /// A durable case, promotion, and scorecard store backed by one append-only file.
+///
+/// Scorecard records store one byte per check for the check category and one
+/// for its [`CheckOutcome`]: `0` not evaluated, `1` passed, `2` failed. Format
+/// version 1 stored a passed flag instead and could not tell a check that
+/// passed a stated requirement from one that had no requirement to check, so
+/// [`FileStore::open`] rejects a version-1 file rather than reinterpreting its
+/// flags.
 #[derive(Debug)]
 pub struct FileStore {
     file: File,
@@ -36,8 +44,16 @@ impl FileStore {
 
         let bytes = fs::read(&file_path).map_err(io_error)?;
         let mut reader = Reader::new(&bytes);
-        if reader.take(MAGIC.len())? != MAGIC {
-            return Err(invalid("missing file-store header"));
+        match reader.take(MAGIC.len())? {
+            header if header == MAGIC => {}
+            header if header == MAGIC_V1 => {
+                return Err(StoreError::UnsupportedFormat(
+                    "store.bin was written by format version 1, whose scorecards \
+                     cannot distinguish a passed check from an unevaluated one"
+                        .to_owned(),
+                ))
+            }
+            _ => return Err(invalid("missing file-store header")),
         }
 
         let mut store = Self {
@@ -96,9 +112,9 @@ impl FileStore {
                 let mut cases = Vec::with_capacity(count);
                 for _ in 0..count {
                     let id = reader.id()?;
-                    let mut checks = [(CheckKind::RequiredFacts, false); 4];
+                    let mut checks = [(CheckKind::RequiredFacts, CheckOutcome::NotEvaluated); 4];
                     for check in &mut checks {
-                        *check = (reader.kind()?, reader.boolean()?);
+                        *check = (reader.kind()?, reader.outcome()?);
                     }
                     cases.push((id, checks));
                 }
@@ -183,7 +199,7 @@ impl ScorecardStore for FileStore {
             record.extend_from_slice(&case.case_id().digest());
             for check in case.checks() {
                 record.push(kind_byte(check.kind()));
-                record.push(u8::from(check.passed()));
+                record.push(outcome_byte(check.outcome()));
             }
         }
         self.append(&record)?;
@@ -216,6 +232,14 @@ fn kind_byte(kind: CheckKind) -> u8 {
         CheckKind::RequiredTools => 1,
         CheckKind::Trajectory => 2,
         CheckKind::Latency => 3,
+    }
+}
+
+fn outcome_byte(outcome: CheckOutcome) -> u8 {
+    match outcome {
+        CheckOutcome::NotEvaluated => 0,
+        CheckOutcome::Passed => 1,
+        CheckOutcome::Failed => 2,
     }
 }
 
@@ -295,11 +319,12 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn boolean(&mut self) -> Result<bool, StoreError> {
+    fn outcome(&mut self) -> Result<CheckOutcome, StoreError> {
         match self.byte()? {
-            0 => Ok(false),
-            1 => Ok(true),
-            _ => Err(invalid("invalid boolean")),
+            0 => Ok(CheckOutcome::NotEvaluated),
+            1 => Ok(CheckOutcome::Passed),
+            2 => Ok(CheckOutcome::Failed),
+            _ => Err(invalid("unknown check outcome")),
         }
     }
 }

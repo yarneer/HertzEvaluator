@@ -154,7 +154,7 @@ fn score(case: &Case, id: hertz_evaluator::CaseId) -> Result<hertz_evaluator::Sc
         case.clone(),
         ["search", "report"],
         ["plan", "search", "report"],
-        Duration::from_millis(100),
+        Some(Duration::from_millis(100)),
     )
     .map_err(|error| error.to_string())?;
     Ok(score_run(

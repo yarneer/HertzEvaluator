@@ -17,6 +17,18 @@
 //! is `case-v1-sha256:` followed by the lowercase hexadecimal digest. This
 //! encoding and hash are frozen for version 1; any future change must use a new
 //! `CaseId` version.
+//!
+//! # Check outcomes
+//!
+//! A deterministic check is evaluated when, and only when, its [`PinnedCase`]
+//! states a requirement for it: a non-empty required-fact list, a non-empty
+//! required-tool list, a non-empty required trajectory, or a latency ceiling
+//! that is `Some`. Without a requirement there is nothing to compare the run
+//! against, and the check reports [`CheckOutcome::NotEvaluated`] rather than
+//! passing on an empty requirement. [`CheckResult::passed`] is true only for
+//! [`CheckOutcome::Passed`], and [`compare_scorecards`] counts only those, so
+//! filling a missing constraint in later turns an unevaluated check into a
+//! real pass or a real failure instead of reading as a regression from a pass.
 
 mod case;
 mod compare;
@@ -25,13 +37,15 @@ mod promotion;
 mod score {
     include!("score.rs");
 
-    pub(crate) fn restore_scorecard(stored: Vec<(CaseId, [(CheckKind, bool); 4])>) -> Scorecard {
+    pub(crate) fn restore_scorecard(
+        stored: Vec<(CaseId, [(CheckKind, CheckOutcome); 4])>,
+    ) -> Scorecard {
         Scorecard {
             cases: stored
                 .into_iter()
                 .map(|(case_id, checks)| CaseScore {
                     case_id,
-                    checks: checks.map(|(kind, passed)| CheckResult { kind, passed }),
+                    checks: checks.map(|(kind, outcome)| CheckResult { kind, outcome }),
                 })
                 .collect(),
         }
@@ -44,7 +58,8 @@ pub use compare::{compare_scorecards, ComparisonOutcome, ComparisonReport};
 pub use file_store::FileStore;
 pub use promotion::CasePromotion;
 pub use score::{
-    score_run, CaseScore, CheckKind, CheckResult, PinError, PinnedCase, RecordedRun, Scorecard,
+    score_run, CaseScore, CheckKind, CheckOutcome, CheckResult, PinError, PinnedCase, RecordedRun,
+    Scorecard,
 };
 pub use store::{CaseStore, InMemoryStore, ScorecardStore, StoreError};
 
@@ -52,8 +67,8 @@ pub use store::{CaseStore, InMemoryStore, ScorecardStore, StoreError};
 mod tests {
     use super::{
         compare_scorecards, score_run, Case, CaseId, CasePromotion, CaseStore, CheckKind,
-        ComparisonOutcome, FileStore, InMemoryStore, PinnedCase, RecordedRun, Scorecard,
-        ScorecardStore, StoreError,
+        CheckOutcome, ComparisonOutcome, FileStore, InMemoryStore, PinnedCase, RecordedRun,
+        Scorecard, ScorecardStore, StoreError,
     };
     use std::{
         fs,
@@ -186,7 +201,7 @@ mod tests {
             case.clone(),
             ["search", "report"],
             ["plan", "search", "report"],
-            Duration::from_millis(100),
+            Some(Duration::from_millis(100)),
         )
         .unwrap();
         (id, case, pinned)
@@ -314,11 +329,158 @@ mod tests {
             let failed: Vec<_> = scorecard.cases()[0]
                 .checks()
                 .iter()
-                .filter(|check| !check.passed())
+                .filter(|check| check.failed())
                 .map(|check| check.kind())
                 .collect();
             assert_eq!(failed, [expected_failure]);
         }
+    }
+
+    const NO_REQUIREMENT: [&str; 0] = [];
+
+    fn mixed_requirement_case() -> (CaseId, Case) {
+        let mut store = InMemoryStore::new();
+        let case = Case::new(
+            "Evaluate a run recorded without tool or latency data.",
+            ["The regression suite passed."],
+        );
+        let id = store.register(case.clone()).unwrap();
+        (id, case)
+    }
+
+    #[test]
+    fn a_stated_requirement_a_missed_one_and_an_absent_one_read_differently() {
+        let (id, case) = mixed_requirement_case();
+        let pinned = PinnedCase::new(id, case, ["search"], NO_REQUIREMENT, None).unwrap();
+        let run = RecordedRun::new(
+            "The regression suite passed.",
+            ["report"],
+            ["plan"],
+            Duration::from_millis(80),
+        );
+
+        let scorecard = score_run(&run, &[pinned]);
+
+        let outcomes: Vec<_> = scorecard.cases()[0]
+            .checks()
+            .iter()
+            .map(|check| (check.kind(), check.outcome()))
+            .collect();
+        assert_eq!(
+            outcomes,
+            [
+                (CheckKind::RequiredFacts, CheckOutcome::Passed),
+                (CheckKind::RequiredTools, CheckOutcome::Failed),
+                (CheckKind::Trajectory, CheckOutcome::NotEvaluated),
+                (CheckKind::Latency, CheckOutcome::NotEvaluated),
+            ]
+        );
+        assert_eq!(scorecard.passed_checks(), 1);
+        assert_eq!(scorecard.evaluated_checks(), 2);
+        assert!(!scorecard.passed());
+    }
+
+    #[test]
+    fn a_case_that_states_no_requirement_verifies_nothing_and_does_not_pass() {
+        let mut store = InMemoryStore::new();
+        let case = Case::new(
+            "Evaluate a run with no recorded constraint.",
+            NO_REQUIREMENT,
+        );
+        let id = store.register(case.clone()).unwrap();
+        let pinned = PinnedCase::new(id, case, NO_REQUIREMENT, NO_REQUIREMENT, None).unwrap();
+
+        let scorecard = score_run(&passing_run(), &[pinned]);
+
+        assert!(scorecard.cases()[0]
+            .checks()
+            .iter()
+            .all(|check| check.outcome() == CheckOutcome::NotEvaluated));
+        assert_eq!(scorecard.evaluated_checks(), 0);
+        assert_eq!(scorecard.passed_checks(), 0);
+        assert!(!scorecard.cases()[0].passed());
+        assert!(!scorecard.passed());
+    }
+
+    #[test]
+    fn supplying_a_constraint_the_baseline_lacked_is_not_a_regression() {
+        let (id, case) = mixed_requirement_case();
+        let unconstrained =
+            PinnedCase::new(id, case.clone(), NO_REQUIREMENT, NO_REQUIREMENT, None).unwrap();
+        let constrained = PinnedCase::new(
+            id,
+            case,
+            NO_REQUIREMENT,
+            NO_REQUIREMENT,
+            Some(Duration::from_millis(100)),
+        )
+        .unwrap();
+        let run = RecordedRun::new(
+            "The regression suite passed.",
+            NO_REQUIREMENT,
+            NO_REQUIREMENT,
+            Duration::from_millis(500),
+        );
+        let baseline = score_run(&run, &[unconstrained]);
+        let candidate = score_run(&run, &[constrained]);
+
+        assert_eq!(
+            baseline.cases()[0].checks()[3].outcome(),
+            CheckOutcome::NotEvaluated
+        );
+        assert_eq!(
+            candidate.cases()[0].checks()[3].outcome(),
+            CheckOutcome::Failed
+        );
+        let report = compare_scorecards(&candidate, Some(&baseline));
+        assert_ne!(report.outcome(), ComparisonOutcome::Regressed);
+        assert_eq!(report.outcome(), ComparisonOutcome::Unchanged);
+        assert_eq!(report.baseline_passed_checks(), Some(1));
+        assert_eq!(report.candidate_passed_checks(), 1);
+    }
+
+    #[test]
+    fn file_store_restores_an_unevaluated_check() {
+        let path = temp_store("unevaluated");
+        let (id, case) = mixed_requirement_case();
+        let pinned = PinnedCase::new(id, case.clone(), ["search"], NO_REQUIREMENT, None).unwrap();
+        let scorecard = score_run(&passing_run(), &[pinned]);
+        {
+            let mut store = FileStore::open(&path).unwrap();
+            store.register(case).unwrap();
+            store.save_scorecard("candidate", &scorecard).unwrap();
+        }
+
+        let store = FileStore::open(&path).unwrap();
+        let loaded = store.load_scorecard("candidate").unwrap();
+
+        assert_eq!(loaded, scorecard);
+        assert_eq!(loaded.evaluated_checks(), 2);
+        assert_eq!(
+            loaded.cases()[0].checks()[2].outcome(),
+            CheckOutcome::NotEvaluated
+        );
+
+        drop(store);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn a_version_one_store_file_is_rejected_instead_of_reinterpreted() {
+        let path = temp_store("legacy");
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("store.bin"), b"HERTZ-FILE-1\n").unwrap();
+
+        let opened = FileStore::open(&path);
+
+        match opened {
+            Err(StoreError::UnsupportedFormat(message)) => {
+                assert!(message.contains("version 1"), "{message}");
+            }
+            other => panic!("expected an unsupported-format error, got {other:?}"),
+        }
+
+        fs::remove_dir_all(path).unwrap();
     }
 
     #[test]
@@ -363,7 +525,7 @@ mod tests {
             original,
             ["search", "report"],
             ["plan", "search", "report"],
-            Duration::from_millis(100),
+            Some(Duration::from_millis(100)),
         )
         .unwrap();
         let scorecard = score_run(&passing_run(), &[pinned]);

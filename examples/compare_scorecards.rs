@@ -97,7 +97,7 @@ fn score_fixture(name: &str) -> Result<Scorecard, String> {
         case,
         ["search", "report"],
         ["plan", "search", "report"],
-        Duration::from_millis(100),
+        Some(Duration::from_millis(100)),
     )
     .map_err(|error| error.to_string())?;
     Ok(score_run(
