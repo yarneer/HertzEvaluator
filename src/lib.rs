@@ -20,25 +20,46 @@
 
 mod case;
 mod compare;
+mod file_store;
 mod promotion;
-mod score;
+mod score {
+    include!("score.rs");
+
+    pub(crate) fn restore_scorecard(stored: Vec<(CaseId, [(CheckKind, bool); 4])>) -> Scorecard {
+        Scorecard {
+            cases: stored
+                .into_iter()
+                .map(|(case_id, checks)| CaseScore {
+                    case_id,
+                    checks: checks.map(|(kind, passed)| CheckResult { kind, passed }),
+                })
+                .collect(),
+        }
+    }
+}
 mod store;
 
 pub use case::{Case, CaseId};
 pub use compare::{compare_scorecards, ComparisonOutcome, ComparisonReport};
+pub use file_store::FileStore;
 pub use promotion::CasePromotion;
 pub use score::{
     score_run, CaseScore, CheckKind, CheckResult, PinError, PinnedCase, RecordedRun, Scorecard,
 };
-pub use store::{CaseStore, InMemoryStore, StoreError};
+pub use store::{CaseStore, InMemoryStore, ScorecardStore, StoreError};
 
 #[cfg(test)]
 mod tests {
     use super::{
         compare_scorecards, score_run, Case, CaseId, CasePromotion, CaseStore, CheckKind,
-        ComparisonOutcome, InMemoryStore, PinnedCase, RecordedRun, Scorecard, StoreError,
+        ComparisonOutcome, FileStore, InMemoryStore, PinnedCase, RecordedRun, Scorecard,
+        ScorecardStore, StoreError,
     };
-    use std::time::Duration;
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
 
     fn case() -> Case {
         Case::new(
@@ -312,5 +333,84 @@ mod tests {
         assert!(store.prod().is_empty());
         assert_eq!(store.prod(), &prod_before);
         assert_eq!(store.load(&id), Ok(case));
+    }
+
+    fn temp_store(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "hertz-evaluator-{name}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn exercise_store<S>(store: &mut S) -> (CaseId, CaseId, Scorecard)
+    where
+        S: CaseStore + CasePromotion + ScorecardStore,
+    {
+        let original = case();
+        let original_id = store.register(original.clone()).unwrap();
+        store.approve(&original_id).unwrap();
+        let modified = Case::new(
+            "Explain why the modified snapshot is safe.",
+            ["The regression suite passed."],
+        );
+        let modified_id = store.register(modified).unwrap();
+        let pinned = PinnedCase::new(
+            original_id,
+            original,
+            ["search", "report"],
+            ["plan", "search", "report"],
+            Duration::from_millis(100),
+        )
+        .unwrap();
+        let scorecard = score_run(&passing_run(), &[pinned]);
+        store.save_scorecard("candidate", &scorecard).unwrap();
+        (original_id, modified_id, scorecard)
+    }
+
+    #[test]
+    fn file_store_survives_a_new_instance() {
+        let path = temp_store("reopen");
+        let (original_id, modified_id, expected_scorecard) = {
+            let mut store = FileStore::open(&path).unwrap();
+            exercise_store(&mut store)
+        };
+
+        let store = FileStore::open(&path).unwrap();
+        assert_eq!(store.load(&original_id), Ok(case()));
+        assert!(store.prod().contains(&original_id));
+        assert!(!store.prod().contains(&modified_id));
+        let loaded = store.load_scorecard("candidate").unwrap();
+        assert_eq!(loaded, expected_scorecard);
+        assert_eq!(
+            compare_scorecards(&loaded, Some(&expected_scorecard)),
+            compare_scorecards(&expected_scorecard, Some(&expected_scorecard))
+        );
+
+        drop(store);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn file_and_memory_backends_have_the_same_visible_results() {
+        let path = temp_store("parity");
+        let mut memory = InMemoryStore::new();
+        let mut file = FileStore::open(&path).unwrap();
+        let memory_result = exercise_store(&mut memory);
+        let file_result = exercise_store(&mut file);
+
+        assert_eq!(memory_result, file_result);
+        assert_eq!(memory.prod(), file.prod());
+        assert_eq!(memory.load(&memory_result.0), file.load(&file_result.0));
+        assert_eq!(
+            memory.load_scorecard("candidate"),
+            file.load_scorecard("candidate")
+        );
+
+        drop(file);
+        fs::remove_dir_all(path).unwrap();
     }
 }

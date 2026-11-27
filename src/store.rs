@@ -1,4 +1,4 @@
-use crate::{Case, CaseId, CasePromotion};
+use crate::{Case, CaseId, CasePromotion, Scorecard};
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
@@ -14,6 +14,15 @@ pub trait CaseStore {
     fn load(&self, id: &CaseId) -> Result<Case, StoreError>;
 }
 
+/// Storage operations for named deterministic scorecards.
+pub trait ScorecardStore {
+    /// Saves or replaces a scorecard under `name`.
+    fn save_scorecard(&mut self, name: &str, scorecard: &Scorecard) -> Result<(), StoreError>;
+
+    /// Loads the scorecard saved under `name`.
+    fn load_scorecard(&self, name: &str) -> Result<Scorecard, StoreError>;
+}
+
 /// Errors returned by a [`CaseStore`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StoreError {
@@ -21,6 +30,12 @@ pub enum StoreError {
     NotFound(CaseId),
     /// Different content unexpectedly produced an occupied id.
     HashCollision(CaseId),
+    /// No scorecard is stored under this name.
+    ScorecardNotFound(String),
+    /// A filesystem operation failed.
+    Io(String),
+    /// Stored bytes could not be decoded or failed validation.
+    InvalidData(String),
 }
 
 impl fmt::Display for StoreError {
@@ -28,6 +43,9 @@ impl fmt::Display for StoreError {
         match self {
             Self::NotFound(id) => write!(formatter, "case not found: {id}"),
             Self::HashCollision(id) => write!(formatter, "case id collision: {id}"),
+            Self::ScorecardNotFound(name) => write!(formatter, "scorecard not found: {name}"),
+            Self::Io(message) => write!(formatter, "file store I/O error: {message}"),
+            Self::InvalidData(message) => write!(formatter, "invalid file store data: {message}"),
         }
     }
 }
@@ -39,6 +57,7 @@ impl Error for StoreError {}
 pub struct InMemoryStore {
     cases: HashMap<CaseId, Case>,
     prod: HashSet<CaseId>,
+    scorecards: HashMap<String, Scorecard>,
 }
 
 impl InMemoryStore {
@@ -85,5 +104,19 @@ impl CasePromotion for InMemoryStore {
 
     fn prod(&self) -> &HashSet<CaseId> {
         &self.prod
+    }
+}
+
+impl ScorecardStore for InMemoryStore {
+    fn save_scorecard(&mut self, name: &str, scorecard: &Scorecard) -> Result<(), StoreError> {
+        self.scorecards.insert(name.to_owned(), scorecard.clone());
+        Ok(())
+    }
+
+    fn load_scorecard(&self, name: &str) -> Result<Scorecard, StoreError> {
+        self.scorecards
+            .get(name)
+            .cloned()
+            .ok_or_else(|| StoreError::ScorecardNotFound(name.to_owned()))
     }
 }
