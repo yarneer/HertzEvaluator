@@ -1,0 +1,4 @@
+output=The regression suite passed.
+tools=search,report
+trajectory=plan,report,search,finish
+elapsed_ms=80
