@@ -19,11 +19,13 @@
 //! `CaseId` version.
 
 mod case;
+mod compare;
 mod promotion;
 mod score;
 mod store;
 
 pub use case::{Case, CaseId};
+pub use compare::{compare_scorecards, ComparisonOutcome, ComparisonReport};
 pub use promotion::CasePromotion;
 pub use score::{
     score_run, CaseScore, CheckKind, CheckResult, PinError, PinnedCase, RecordedRun, Scorecard,
@@ -33,8 +35,8 @@ pub use store::{CaseStore, InMemoryStore, StoreError};
 #[cfg(test)]
 mod tests {
     use super::{
-        score_run, Case, CaseId, CasePromotion, CaseStore, CheckKind, InMemoryStore, PinnedCase,
-        RecordedRun, StoreError,
+        compare_scorecards, score_run, Case, CaseId, CasePromotion, CaseStore, CheckKind,
+        ComparisonOutcome, InMemoryStore, PinnedCase, RecordedRun, Scorecard, StoreError,
     };
     use std::time::Duration;
 
@@ -176,6 +178,59 @@ mod tests {
             ["plan", "search", "report", "finish"],
             Duration::from_millis(80),
         )
+    }
+
+    fn score(output: &str) -> Scorecard {
+        let (_, _, pinned) = scoring_case();
+        score_run(
+            &RecordedRun::new(
+                output,
+                ["search", "report"],
+                ["plan", "search", "report", "finish"],
+                Duration::from_millis(80),
+            ),
+            &[pinned],
+        )
+    }
+
+    #[test]
+    fn scorecard_comparison_reports_all_outcomes() {
+        let passing = score("The regression suite passed.");
+        let failing = score("No result was recorded.");
+
+        assert_eq!(
+            compare_scorecards(&passing, Some(&failing)).outcome(),
+            ComparisonOutcome::Improved
+        );
+        assert_eq!(
+            compare_scorecards(&passing, Some(&passing)).outcome(),
+            ComparisonOutcome::Unchanged
+        );
+        assert_eq!(
+            compare_scorecards(&failing, Some(&passing)).outcome(),
+            ComparisonOutcome::Regressed
+        );
+    }
+
+    #[test]
+    fn scorecard_comparison_is_deterministic() {
+        let passing = score("The regression suite passed.");
+        let failing = score("No result was recorded.");
+
+        assert_eq!(
+            compare_scorecards(&passing, Some(&failing)),
+            compare_scorecards(&passing, Some(&failing))
+        );
+    }
+
+    #[test]
+    fn missing_baseline_is_an_explicit_first_run() {
+        let passing = score("The regression suite passed.");
+        let report = compare_scorecards(&passing, None);
+
+        assert_eq!(report.outcome(), ComparisonOutcome::FirstRun);
+        assert_eq!(report.baseline_passed_checks(), None);
+        assert_eq!(report.candidate_passed_checks(), 4);
     }
 
     #[test]
