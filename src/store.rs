@@ -1,5 +1,9 @@
-use crate::{Case, CaseId};
-use std::{collections::HashMap, error::Error, fmt};
+use crate::{Case, CaseId, CasePromotion};
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+    fmt,
+};
 
 /// Storage operations for immutable, content-addressed cases.
 pub trait CaseStore {
@@ -34,6 +38,7 @@ impl Error for StoreError {}
 #[derive(Debug, Default)]
 pub struct InMemoryStore {
     cases: HashMap<CaseId, Case>,
+    prod: HashSet<CaseId>,
 }
 
 impl InMemoryStore {
@@ -58,5 +63,27 @@ impl CaseStore for InMemoryStore {
 
     fn load(&self, id: &CaseId) -> Result<Case, StoreError> {
         self.cases.get(id).cloned().ok_or(StoreError::NotFound(*id))
+    }
+}
+
+impl CasePromotion for InMemoryStore {
+    fn approve(&mut self, id: &CaseId) -> Result<(), StoreError> {
+        if !self.cases.contains_key(id) {
+            return Err(StoreError::NotFound(*id));
+        }
+        self.prod.insert(*id);
+        Ok(())
+    }
+
+    fn demote(&mut self, id: &CaseId) -> Result<(), StoreError> {
+        if !self.cases.contains_key(id) {
+            return Err(StoreError::NotFound(*id));
+        }
+        self.prod.remove(id);
+        Ok(())
+    }
+
+    fn prod(&self) -> &HashSet<CaseId> {
+        &self.prod
     }
 }
