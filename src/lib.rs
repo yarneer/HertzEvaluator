@@ -629,6 +629,43 @@ mod tests {
         assert_eq!(store.load(&id), Ok(case));
     }
 
+    /// A repeated check kind must not be mistaken for a different kind.
+    ///
+    /// The verdict surface is a bitmask keyed by [`CheckKind`] so that it does
+    /// not depend on array position. Accumulating those bits by addition would
+    /// undo that: two `RequiredFacts` verdicts carry into the `RequiredTools`
+    /// bit, giving the same mask as one `RequiredTools` verdict, and the two
+    /// scorecards would compare as though they had judged the same things.
+    #[test]
+    fn a_repeated_check_kind_does_not_alias_another_kind() {
+        let id = CaseId::from_digest([7; 32]);
+        let twice_the_same_kind = super::score::restore_scorecard(vec![(
+            id,
+            [
+                (CheckKind::RequiredFacts, CheckOutcome::Passed),
+                (CheckKind::RequiredFacts, CheckOutcome::Passed),
+                (CheckKind::Trajectory, CheckOutcome::NotEvaluated),
+                (CheckKind::Latency, CheckOutcome::NotEvaluated),
+            ],
+        )]);
+        let the_neighbouring_kind = super::score::restore_scorecard(vec![(
+            id,
+            [
+                (CheckKind::RequiredTools, CheckOutcome::Passed),
+                (CheckKind::RequiredFacts, CheckOutcome::NotEvaluated),
+                (CheckKind::Trajectory, CheckOutcome::NotEvaluated),
+                (CheckKind::Latency, CheckOutcome::NotEvaluated),
+            ],
+        )]);
+
+        let report = compare_scorecards(&twice_the_same_kind, Some(&the_neighbouring_kind));
+
+        assert_eq!(
+            report.outcome(),
+            ComparisonOutcome::Incomparable(Incomparability::StatedRequirementsDiffer)
+        );
+    }
+
     fn temp_store(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "hertz-evaluator-{name}-{}-{}",
